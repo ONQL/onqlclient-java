@@ -197,46 +197,11 @@ public final class ONQLClient implements AutoCloseable {
     // ------------------------------------------------------------------ //
     //  Direct ORM-style API (insert / update / delete / onql / build)
     //
-    //  `path` is a dotted string:
-    //    "mydb.users"      -> whole `users` table in database `mydb`
-    //    "mydb.users.u1"   -> record with id `u1`
+    //  `query` arguments are ONQL expression strings, e.g.
+    //    "mydb.users[id=\"u1\"].id"
+    //    "mydb.orders[status=\"pending\"]"
+    //  Use build(template, values...) to substitute $1, $2, ...
     // ------------------------------------------------------------------ //
-
-    private static final class Path {
-        final String db;
-        final String table;
-        final String id;
-        Path(String db, String table, String id) {
-            this.db = db; this.table = table; this.id = id;
-        }
-    }
-
-    private static Path parsePath(String path, boolean requireId) {
-        if (path == null || path.isEmpty()) {
-            throw new IllegalArgumentException(
-                "Path must be a non-empty string like \"db.table\" or \"db.table.id\"");
-        }
-        int dot1 = path.indexOf('.');
-        if (dot1 <= 0 || dot1 == path.length() - 1) {
-            throw new IllegalArgumentException(
-                "Path \"" + path + "\" must contain at least \"db.table\"");
-        }
-        int dot2 = path.indexOf('.', dot1 + 1);
-        String db = path.substring(0, dot1);
-        String table, id;
-        if (dot2 == -1) {
-            table = path.substring(dot1 + 1);
-            id = "";
-        } else {
-            table = path.substring(dot1 + 1, dot2);
-            id = path.substring(dot2 + 1);
-        }
-        if (requireId && id.isEmpty()) {
-            throw new IllegalArgumentException(
-                "Path \"" + path + "\" must include a record id: \"db.table.id\"");
-        }
-        return new Path(db, table, id);
-    }
 
     /**
      * Parse the standard {@code {"error": "...", "data": ...}} server envelope.
@@ -274,14 +239,13 @@ public final class ONQLClient implements AutoCloseable {
     }
 
     /**
-     * Insert a single record at {@code path} (e.g. {@code "mydb.users"}).
+     * Insert a single record into {@code db.table}.
      * The caller JSON-serializes the record into {@code recordJson}.
      */
-    public String insert(String path, String recordJson) throws Exception {
-        Path p = parsePath(path, false);
+    public String insert(String db, String table, String recordJson) throws Exception {
         String payload = "{"
-                + "\"db\":"      + jsonString(p.db)    + ","
-                + "\"table\":"   + jsonString(p.table) + ","
+                + "\"db\":"      + jsonString(db)    + ","
+                + "\"table\":"   + jsonString(table) + ","
                 + "\"records\":" + recordJson
                 + "}";
         ONQLResponse res = sendRequest("insert", payload);
@@ -289,21 +253,29 @@ public final class ONQLClient implements AutoCloseable {
     }
 
     /**
-     * Update the record at {@code path} (e.g. {@code "mydb.users.u1"}).
+     * Update records in {@code db.table} matching {@code query}. Uses
+     * {@code "default"} proto-pass and no explicit ids.
      */
-    public String update(String path, String recordJson) throws Exception {
-        return update(path, recordJson, "default");
+    public String update(String db, String table, String recordJson, String query) throws Exception {
+        return update(db, table, recordJson, query, "default", "[]");
     }
 
-    public String update(String path, String recordJson, String protopass) throws Exception {
-        Path p = parsePath(path, true);
-        String idsJson = "[" + jsonString(p.id) + "]";
+    /**
+     * Update records in {@code db.table}.
+     *
+     * @param query     ONQL query expression (or {@code ""} when using idsJson).
+     * @param protopass Proto-pass profile.
+     * @param idsJson   JSON array of explicit record IDs, e.g. {@code "[]"}
+     *                  or {@code "[\"u1\"]"}.
+     */
+    public String update(String db, String table, String recordJson,
+                         String query, String protopass, String idsJson) throws Exception {
         String payload = "{"
-                + "\"db\":"        + jsonString(p.db)       + ","
-                + "\"table\":"     + jsonString(p.table)    + ","
-                + "\"records\":"   + recordJson             + ","
-                + "\"query\":\"\","
-                + "\"protopass\":" + jsonString(protopass)  + ","
+                + "\"db\":"        + jsonString(db)       + ","
+                + "\"table\":"     + jsonString(table)    + ","
+                + "\"records\":"   + recordJson           + ","
+                + "\"query\":"     + jsonString(query)    + ","
+                + "\"protopass\":" + jsonString(protopass) + ","
                 + "\"ids\":"       + idsJson
                 + "}";
         ONQLResponse res = sendRequest("update", payload);
@@ -311,20 +283,19 @@ public final class ONQLClient implements AutoCloseable {
     }
 
     /**
-     * Delete the record at {@code path} (e.g. {@code "mydb.users.u1"}).
+     * Delete records in {@code db.table} matching {@code query}.
      */
-    public String delete(String path) throws Exception {
-        return delete(path, "default");
+    public String delete(String db, String table, String query) throws Exception {
+        return delete(db, table, query, "default", "[]");
     }
 
-    public String delete(String path, String protopass) throws Exception {
-        Path p = parsePath(path, true);
-        String idsJson = "[" + jsonString(p.id) + "]";
+    public String delete(String db, String table, String query,
+                         String protopass, String idsJson) throws Exception {
         String payload = "{"
-                + "\"db\":"        + jsonString(p.db)       + ","
-                + "\"table\":"     + jsonString(p.table)    + ","
-                + "\"query\":\"\","
-                + "\"protopass\":" + jsonString(protopass)  + ","
+                + "\"db\":"        + jsonString(db)       + ","
+                + "\"table\":"     + jsonString(table)    + ","
+                + "\"query\":"     + jsonString(query)    + ","
+                + "\"protopass\":" + jsonString(protopass) + ","
                 + "\"ids\":"       + idsJson
                 + "}";
         ONQLResponse res = sendRequest("delete", payload);
