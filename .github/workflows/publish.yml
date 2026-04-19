@@ -2,8 +2,8 @@ name: Publish to Maven Central
 
 on:
   push:
-    tags:
-      - "v*"
+    branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
 
 jobs:
@@ -24,9 +24,28 @@ jobs:
           gpg-private-key: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
           gpg-passphrase: MAVEN_GPG_PASSPHRASE
 
-      - name: Build and deploy
+      - name: Read local version
+        id: local
+        run: |
+          V=$(mvn -q -Dexec.executable=echo -Dexec.args='${project.version}' --non-recursive exec:exec)
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - name: Check if version already on Maven Central
+        id: gate
+        run: |
+          set +e
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://repo1.maven.org/maven2/org/onql/onql-client/${{ steps.local.outputs.version }}/onql-client-${{ steps.local.outputs.version }}.pom")
+          if [ "$STATUS" = "200" ]; then
+            echo "already=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Deploy to Maven Central
+        if: steps.gate.outputs.already == 'false'
         env:
           MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
           MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
           MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
-        run: mvn --batch-mode -P release clean deploy
+        run: mvn --batch-mode clean deploy
