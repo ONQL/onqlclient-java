@@ -4,7 +4,7 @@ Official Java client for the ONQL database server.
 
 ## Installation
 
-### Maven
+### Maven (Maven Central)
 
 ```xml
 <dependency>
@@ -14,10 +14,50 @@ Official Java client for the ONQL database server.
 </dependency>
 ```
 
-### Gradle
+### Gradle (Maven Central)
 
 ```groovy
 implementation 'org.onql:onql-client:1.0.0'
+```
+
+### JitPack (build straight from GitHub)
+
+Add the JitPack repository:
+
+```xml
+<repositories>
+  <repository>
+    <id>jitpack.io</id>
+    <url>https://jitpack.io</url>
+  </repository>
+</repositories>
+```
+
+Then depend on a tag, branch, or commit:
+
+```xml
+<dependency>
+  <groupId>com.github.ONQL</groupId>
+  <artifactId>onqlclient-java</artifactId>
+  <version>v1.0.0</version>   <!-- or: main-SNAPSHOT -->
+</dependency>
+```
+
+Gradle equivalent:
+
+```groovy
+repositories { maven { url 'https://jitpack.io' } }
+dependencies {
+    implementation 'com.github.ONQL:onqlclient-java:v1.0.0'
+}
+```
+
+### Build from source
+
+```bash
+git clone https://github.com/ONQL/onqlclient-java.git
+cd onqlclient-java
+mvn clean install
 ```
 
 ## Quick Start
