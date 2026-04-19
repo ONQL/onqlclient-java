@@ -15,24 +15,20 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * A thread-safe, synchronous Java client for the ONQL TCP server.
+ * A thread-safe Java client for the ONQL TCP server.
  *
  * <p>Protocol wire format:
  * <ul>
  *   <li>Request:  {@code {rid}\x1E{keyword}\x1E{payload}\x04}</li>
  *   <li>Response: {@code {rid}\x1E{source}\x1E{payload}\x04}</li>
  * </ul>
- *
- * <p>A background reader thread continuously reads from the socket, parses
- * incoming messages, and dispatches them to the appropriate pending future
- * or subscription callback.
  */
 public final class ONQLClient implements AutoCloseable {
 
     private static final Logger LOG = Logger.getLogger(ONQLClient.class.getName());
 
-    private static final byte EOM = 0x04;          // end-of-message
-    private static final String DELIMITER = "\u001E"; // record separator
+    private static final byte EOM = 0x04;
+    private static final String DELIMITER = "\u001E";
     private static final long DEFAULT_TIMEOUT_MS = 10_000;
 
     private final Socket socket;
@@ -42,30 +38,6 @@ public final class ONQLClient implements AutoCloseable {
     private volatile boolean closed = false;
 
     private final ConcurrentHashMap<String, CompletableFuture<ONQLResponse>> pendingRequests = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, SubscriptionCallback> subscriptions = new ConcurrentHashMap<>();
-
-    /** Default database name used by insert/update/delete/onql. */
-    private volatile String db = "";
-
-    // ------------------------------------------------------------------ //
-    //  Subscription callback
-    // ------------------------------------------------------------------ //
-
-    /**
-     * Callback interface for streaming subscription messages.
-     */
-    @FunctionalInterface
-    public interface SubscriptionCallback {
-        /**
-         * Called on the reader thread whenever a new frame arrives for this
-         * subscription.
-         *
-         * @param rid     the subscription request ID
-         * @param source  the source field from the server response
-         * @param payload the payload body
-         */
-        void onMessage(String rid, String source, String payload);
-    }
 
     // ------------------------------------------------------------------ //
     //  Construction
@@ -83,11 +55,6 @@ public final class ONQLClient implements AutoCloseable {
 
     /**
      * Create and return a connected {@link ONQLClient}.
-     *
-     * @param host server hostname
-     * @param port server port
-     * @return a connected client instance
-     * @throws IOException if the TCP connection cannot be established
      */
     public static ONQLClient create(String host, int port) throws IOException {
         Socket sock = new Socket(host, port);
@@ -107,17 +74,6 @@ public final class ONQLClient implements AutoCloseable {
         return sendRequest(keyword, payload, DEFAULT_TIMEOUT_MS);
     }
 
-    /**
-     * Send a request and block until the response arrives or {@code timeoutMs}
-     * elapses.
-     *
-     * @param keyword   the ONQL keyword / command
-     * @param payload   the request payload (often JSON)
-     * @param timeoutMs maximum time to wait in milliseconds
-     * @return the parsed server response
-     * @throws TimeoutException if no response is received within the timeout
-     * @throws IOException      if the connection is closed or broken
-     */
     public ONQLResponse sendRequest(String keyword, String payload, long timeoutMs) throws Exception {
         if (closed) {
             throw new IOException("Client is not connected.");
@@ -138,54 +94,6 @@ public final class ONQLClient implements AutoCloseable {
         }
     }
 
-    /**
-     * Open a streaming subscription. All subsequent frames that arrive with
-     * the returned request ID will be delivered to {@code callback}.
-     *
-     * @param onquery ONQL onquery string (may be empty)
-     * @param query   ONQL query expression
-     * @param callback handler invoked for each streamed message
-     * @return the subscription request ID (pass to {@link #unsubscribe} to stop)
-     * @throws IOException if the frame cannot be sent
-     */
-    public String subscribe(String onquery, String query, SubscriptionCallback callback) throws IOException {
-        if (closed) {
-            throw new IOException("Client is not connected.");
-        }
-
-        String rid = generateRequestId();
-        subscriptions.put(rid, callback);
-
-        String jsonPayload = "{\"onquery\":" + jsonString(onquery) + ",\"query\":" + jsonString(query) + "}";
-        sendFrame(rid, "subscribe", jsonPayload);
-        return rid;
-    }
-
-    /**
-     * Stop receiving events for a subscription. Removes the local callback
-     * and sends an {@code unsubscribe} frame to the server.
-     *
-     * @param rid the subscription request ID returned by {@link #subscribe}
-     */
-    public void unsubscribe(String rid) {
-        subscriptions.remove(rid);
-
-        if (closed) {
-            return;
-        }
-
-        try {
-            String jsonPayload = "{\"rid\":" + jsonString(rid) + "}";
-            sendFrame(rid, "unsubscribe", jsonPayload);
-        } catch (IOException e) {
-            LOG.log(Level.FINE, "unsubscribe frame send failed (ignored)", e);
-        }
-    }
-
-    /**
-     * Close the connection and release all resources. Any pending futures
-     * will complete exceptionally with an {@link IOException}.
-     */
     @Override
     public void close() {
         if (closed) {
@@ -206,7 +114,6 @@ public final class ONQLClient implements AutoCloseable {
             f.completeExceptionally(lost);
         }
         pendingRequests.clear();
-        subscriptions.clear();
 
         LOG.info("Connection closed.");
     }
@@ -215,10 +122,6 @@ public final class ONQLClient implements AutoCloseable {
     //  Internals
     // ------------------------------------------------------------------ //
 
-    /**
-     * Background reader loop. Reads bytes from the socket until an EOM byte
-     * is encountered, parses the message, and dispatches it.
-     */
     private void readerLoop() {
         ByteArrayOutputStream buffer = new ByteArrayOutputStream(4096);
 
@@ -226,13 +129,11 @@ public final class ONQLClient implements AutoCloseable {
             while (!closed && !Thread.currentThread().isInterrupted()) {
                 int b = in.read();
                 if (b == -1) {
-                    // server closed connection
                     LOG.warning("Connection closed by server.");
                     break;
                 }
 
                 if (b == EOM) {
-                    // full message received
                     String message = buffer.toString(StandardCharsets.UTF_8.name());
                     buffer.reset();
                     handleMessage(message);
@@ -246,7 +147,6 @@ public final class ONQLClient implements AutoCloseable {
             }
         }
 
-        // Fail any outstanding requests
         if (!closed) {
             closed = true;
             IOException lost = new IOException("Connection lost.");
@@ -267,18 +167,6 @@ public final class ONQLClient implements AutoCloseable {
         String source = parts[1];
         String payload = parts[2];
 
-        // Check subscriptions first
-        SubscriptionCallback cb = subscriptions.get(rid);
-        if (cb != null) {
-            try {
-                cb.onMessage(rid, source, payload);
-            } catch (Exception e) {
-                LOG.log(Level.WARNING, "Error in subscription callback", e);
-            }
-            return;
-        }
-
-        // Resolve pending request future
         CompletableFuture<ONQLResponse> future = pendingRequests.get(rid);
         if (future != null) {
             future.complete(new ONQLResponse(rid, source, payload));
@@ -301,9 +189,6 @@ public final class ONQLClient implements AutoCloseable {
         out.flush();
     }
 
-    /**
-     * Generate a random 8-character lowercase hex string for use as a request ID.
-     */
     private static String generateRequestId() {
         int value = ThreadLocalRandom.current().nextInt();
         return String.format("%08x", value);
@@ -311,29 +196,52 @@ public final class ONQLClient implements AutoCloseable {
 
     // ------------------------------------------------------------------ //
     //  Direct ORM-style API (insert / update / delete / onql / build)
+    //
+    //  `path` is a dotted string:
+    //    "mydb.users"      -> whole `users` table in database `mydb`
+    //    "mydb.users.u1"   -> record with id `u1`
     // ------------------------------------------------------------------ //
 
-    /**
-     * Set the default database name used by {@link #insert}, {@link #update},
-     * {@link #delete}, and {@link #onql}. Returns {@code this} so calls can be
-     * chained.
-     *
-     * @param db database name
-     * @return this client
-     */
-    public ONQLClient setup(String db) {
-        this.db = db == null ? "" : db;
-        return this;
+    private static final class Path {
+        final String db;
+        final String table;
+        final String id;
+        Path(String db, String table, String id) {
+            this.db = db; this.table = table; this.id = id;
+        }
+    }
+
+    private static Path parsePath(String path, boolean requireId) {
+        if (path == null || path.isEmpty()) {
+            throw new IllegalArgumentException(
+                "Path must be a non-empty string like \"db.table\" or \"db.table.id\"");
+        }
+        int dot1 = path.indexOf('.');
+        if (dot1 <= 0 || dot1 == path.length() - 1) {
+            throw new IllegalArgumentException(
+                "Path \"" + path + "\" must contain at least \"db.table\"");
+        }
+        int dot2 = path.indexOf('.', dot1 + 1);
+        String db = path.substring(0, dot1);
+        String table, id;
+        if (dot2 == -1) {
+            table = path.substring(dot1 + 1);
+            id = "";
+        } else {
+            table = path.substring(dot1 + 1, dot2);
+            id = path.substring(dot2 + 1);
+        }
+        if (requireId && id.isEmpty()) {
+            throw new IllegalArgumentException(
+                "Path \"" + path + "\" must include a record id: \"db.table.id\"");
+        }
+        return new Path(db, table, id);
     }
 
     /**
-     * Parse the standard {@code {"error": "...", "data": "..."}} server envelope.
-     * Returns the raw {@code data} substring (as sent by the server) on success.
-     * Throws a {@link RuntimeException} if the server returned a non-empty
-     * {@code error} field.
-     *
-     * <p>The data is returned verbatim — decode it with your preferred JSON
-     * library.</p>
+     * Parse the standard {@code {"error": "...", "data": ...}} server envelope.
+     * Returns the raw {@code data} substring on success; throws
+     * {@link RuntimeException} if the {@code error} field is non-empty.
      */
     public static String processResult(String raw) {
         if (raw == null) {
@@ -350,7 +258,6 @@ public final class ONQLClient implements AutoCloseable {
         }
         if (!errorValue.isEmpty() && !"null".equals(errorValue)
                 && !"\"\"".equals(errorValue) && !"false".equals(errorValue)) {
-            // Strip surrounding quotes if it's a JSON string.
             String msg = errorValue;
             if (msg.length() >= 2 && msg.charAt(0) == '"' && msg.charAt(msg.length() - 1) == '"') {
                 msg = msg.substring(1, msg.length() - 1);
@@ -367,48 +274,36 @@ public final class ONQLClient implements AutoCloseable {
     }
 
     /**
-     * Insert one or more records into {@code table}. The caller is responsible
-     * for JSON-serializing the record(s) into {@code recordsJson}.
-     *
-     * @param table        target table name
-     * @param recordsJson  a JSON-serialized record object, or array of records
-     * @return the {@code data} substring of the server envelope
+     * Insert a single record at {@code path} (e.g. {@code "mydb.users"}).
+     * The caller JSON-serializes the record into {@code recordJson}.
      */
-    public String insert(String table, String recordsJson) throws Exception {
+    public String insert(String path, String recordJson) throws Exception {
+        Path p = parsePath(path, false);
         String payload = "{"
-                + "\"db\":"      + jsonString(db)    + ","
-                + "\"table\":"   + jsonString(table) + ","
-                + "\"records\":" + recordsJson
+                + "\"db\":"      + jsonString(p.db)    + ","
+                + "\"table\":"   + jsonString(p.table) + ","
+                + "\"records\":" + recordJson
                 + "}";
         ONQLResponse res = sendRequest("insert", payload);
         return processResult(res.getPayload());
     }
 
     /**
-     * Update records in {@code table} matching {@code queryJson}. Uses
-     * {@code "default"} proto-pass and no explicit IDs.
+     * Update the record at {@code path} (e.g. {@code "mydb.users.u1"}).
      */
-    public String update(String table, String recordsJson, String queryJson) throws Exception {
-        return update(table, recordsJson, queryJson, "default", "[]");
+    public String update(String path, String recordJson) throws Exception {
+        return update(path, recordJson, "default");
     }
 
-    /**
-     * Update records in {@code table}.
-     *
-     * @param table        target table
-     * @param recordsJson  JSON object with fields to update
-     * @param queryJson    JSON query to match
-     * @param protopass    proto-pass profile (e.g. {@code "default"})
-     * @param idsJson      JSON array of explicit record IDs (e.g. {@code "[]"})
-     */
-    public String update(String table, String recordsJson, String queryJson,
-                         String protopass, String idsJson) throws Exception {
+    public String update(String path, String recordJson, String protopass) throws Exception {
+        Path p = parsePath(path, true);
+        String idsJson = "[" + jsonString(p.id) + "]";
         String payload = "{"
-                + "\"db\":"        + jsonString(db)        + ","
-                + "\"table\":"     + jsonString(table)     + ","
-                + "\"records\":"   + recordsJson           + ","
-                + "\"query\":"     + queryJson             + ","
-                + "\"protopass\":" + jsonString(protopass) + ","
+                + "\"db\":"        + jsonString(p.db)       + ","
+                + "\"table\":"     + jsonString(p.table)    + ","
+                + "\"records\":"   + recordJson             + ","
+                + "\"query\":\"\","
+                + "\"protopass\":" + jsonString(protopass)  + ","
                 + "\"ids\":"       + idsJson
                 + "}";
         ONQLResponse res = sendRequest("update", payload);
@@ -416,51 +311,30 @@ public final class ONQLClient implements AutoCloseable {
     }
 
     /**
-     * Delete records from {@code table} matching {@code queryJson}. Uses
-     * {@code "default"} proto-pass and no explicit IDs.
+     * Delete the record at {@code path} (e.g. {@code "mydb.users.u1"}).
      */
-    public String delete(String table, String queryJson) throws Exception {
-        return delete(table, queryJson, "default", "[]");
+    public String delete(String path) throws Exception {
+        return delete(path, "default");
     }
 
-    /**
-     * Delete records from {@code table}.
-     *
-     * @param table      target table
-     * @param queryJson  JSON query to match
-     * @param protopass  proto-pass profile
-     * @param idsJson    JSON array of explicit record IDs
-     */
-    public String delete(String table, String queryJson,
-                         String protopass, String idsJson) throws Exception {
+    public String delete(String path, String protopass) throws Exception {
+        Path p = parsePath(path, true);
+        String idsJson = "[" + jsonString(p.id) + "]";
         String payload = "{"
-                + "\"db\":"        + jsonString(db)        + ","
-                + "\"table\":"     + jsonString(table)     + ","
-                + "\"query\":"     + queryJson             + ","
-                + "\"protopass\":" + jsonString(protopass) + ","
+                + "\"db\":"        + jsonString(p.db)       + ","
+                + "\"table\":"     + jsonString(p.table)    + ","
+                + "\"query\":\"\","
+                + "\"protopass\":" + jsonString(protopass)  + ","
                 + "\"ids\":"       + idsJson
                 + "}";
         ONQLResponse res = sendRequest("delete", payload);
         return processResult(res.getPayload());
     }
 
-    /**
-     * Execute a raw ONQL query with defaults
-     * ({@code protopass="default"}, empty context).
-     */
     public String onql(String query) throws Exception {
         return onql(query, "default", "", "[]");
     }
 
-    /**
-     * Execute a raw ONQL query.
-     *
-     * @param query          ONQL query text
-     * @param protopass      proto-pass profile
-     * @param ctxkey         context key
-     * @param ctxvaluesJson  JSON array of context values (e.g. {@code "[]"})
-     * @return the decoded {@code data} substring of the server envelope
-     */
     public String onql(String query, String protopass, String ctxkey, String ctxvaluesJson) throws Exception {
         String payload = "{"
                 + "\"query\":"     + jsonString(query)     + ","
@@ -473,8 +347,8 @@ public final class ONQLClient implements AutoCloseable {
     }
 
     /**
-     * Replace {@code $1, $2, ...} placeholders in {@code query} with values.
-     * Strings are double-quoted, numbers and booleans are inlined verbatim.
+     * Replace {@code $1}, {@code $2}, ... placeholders in {@code query} with values.
+     * Strings are double-quoted; numbers and booleans are inlined verbatim.
      */
     public String build(String query, Object... values) {
         for (int i = 0; i < values.length; i++) {
@@ -496,9 +370,7 @@ public final class ONQLClient implements AutoCloseable {
     }
 
     /**
-     * Extract a single JSON value (string / number / boolean / null / object /
-     * array) starting at {@code start} in {@code raw}, skipping leading spaces.
-     * Returns the raw substring, preserving structure.
+     * Extract a single JSON value starting at {@code start} in {@code raw}.
      */
     private static String extractJsonValue(String raw, int start) {
         int i = start;
@@ -546,9 +418,6 @@ public final class ONQLClient implements AutoCloseable {
         return raw.substring(i, Math.min(end, raw.length()));
     }
 
-    /**
-     * Minimal JSON string escaping (no external dependencies).
-     */
     private static String jsonString(String value) {
         if (value == null) {
             return "\"\"";
